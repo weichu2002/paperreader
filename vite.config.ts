@@ -10,7 +10,7 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          pdfjs: ['pdfjs-dist'],
+          // pdfjs-dist is loaded via CDN, do not bundle it
           vendor: ['react', 'react-dom', 'react-router-dom']
         }
       }
