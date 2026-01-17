@@ -176,7 +176,7 @@ const RepoDetail: React.FC = () => {
                     <div className="space-y-3">
                         {repo.files.map(file => (
                             <Link 
-                                to={`/repo/${repo.id}/reader`}
+                                to={`/repo/${repo.id}/reader?fileId=${file.id}`}
                                 key={file.id} 
                                 className="flex items-center justify-between p-4 rounded-lg border border-gray-100 bg-white hover:border-indigo-300 hover:shadow-sm transition-all group"
                             >

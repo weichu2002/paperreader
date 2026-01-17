@@ -12,31 +12,116 @@ const API_KEY = 'sk-26d09fa903034902928ae380a56ecfd3';
 const BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
 const MODEL_NAME = "deepseek-v3"; 
 
-// --- MOCK DATABASE (In-Memory) ---
-let repos: Repo[] = [
-  {
-    id: 'repo-1',
-    name: 'Attention Is All You Need',
-    description: 'The seminal paper introducing the Transformer architecture.',
-    authors: ['Vaswani et al.'],
-    year: '2017',
-    tags: ['Transformer', 'NLP', 'Deep Learning'],
-    files: [
-      {
-        id: 'file-1-orig',
-        name: 'attention.pdf',
-        type: 'pdf',
-        category: 'original',
-        createdAt: new Date().toISOString()
-      }
-    ],
-    importedAt: new Date().toISOString(),
-    pageCount: 15
-  }
-];
+// --- STORAGE KEYS ---
+const STORAGE_KEYS = {
+  REPOS: 'citerepo_repos_v1',
+  RUNS: 'citerepo_runs_v1'
+};
 
-let runs: Run[] = [];
+// --- INDEXED DB HELPER (For PDF Blobs) ---
+const DB_NAME = 'CiteRepoDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'files';
+
+const idbHelper = {
+  getDB: (): Promise<IDBDatabase> => {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = (event: any) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME);
+        }
+      };
+      request.onsuccess = (event: any) => resolve(event.target.result);
+      request.onerror = (event) => reject(event);
+    });
+  },
+  saveFile: async (id: string, file: Blob) => {
+    const db = await idbHelper.getDB();
+    return new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.put(file, id);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  },
+  getFile: async (id: string): Promise<Blob | undefined> => {
+    const db = await idbHelper.getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.get(id);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  },
+  deleteFile: async (id: string) => {
+    const db = await idbHelper.getDB();
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        store.delete(id);
+        tx.oncomplete = () => resolve();
+    });
+  }
+};
+
+// --- MOCK DATABASE (In-Memory with Persistence) ---
+// Initialize from LocalStorage if available
+let repos: Repo[] = (() => {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.REPOS);
+    return stored ? JSON.parse(stored) : [];
+  } catch (e) { return []; }
+})();
+
+let runs: Run[] = (() => {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.RUNS);
+    return stored ? JSON.parse(stored) : [];
+  } catch (e) { return []; }
+})();
+
 let assets: Asset[] = [];
+
+// Fallback Mock Data if Storage is empty
+if (repos.length === 0) {
+    repos = [
+    {
+        id: 'repo-1',
+        name: 'Attention Is All You Need',
+        description: 'The seminal paper introducing the Transformer architecture.',
+        authors: ['Vaswani et al.'],
+        year: '2017',
+        tags: ['Transformer', 'NLP', 'Deep Learning'],
+        files: [
+        {
+            id: 'file-1-orig',
+            name: 'attention.pdf',
+            type: 'pdf',
+            category: 'original',
+            createdAt: new Date().toISOString()
+            // Note: File object is missing initially in mock, handling in getRepo
+        }
+        ],
+        importedAt: new Date().toISOString(),
+        pageCount: 15
+    }
+    ];
+}
+
+// Helper to persist state
+const persistState = () => {
+  try {
+    // JSON.stringify will strip 'file' (File/Blob) objects automatically, which is what we want for LS
+    localStorage.setItem(STORAGE_KEYS.REPOS, JSON.stringify(repos));
+    localStorage.setItem(STORAGE_KEYS.RUNS, JSON.stringify(runs));
+  } catch (e) {
+    console.error("Failed to save state to LocalStorage", e);
+  }
+};
 
 // Helper to simulate network delay
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -96,7 +181,7 @@ const callAI = async (messages: any[]) => {
 };
 
 // --- SPECIALIZED PROMPTS (UPDATED FOR CHINESE) ---
-
+// ... (Prompts kept exactly as is, omitted for brevity but implicitly included) ...
 const PROMPTS = {
     TRANSLATE: "你是一位专业的学术论文翻译家。请将提供的英文论文片段翻译成中文。要求：\n1. 保持Markdown格式（标题、列表、代码块）。\n2. 保留数学公式的LaTeX格式。\n3. 术语翻译准确、学术化。\n4. 不要输出任何开场白或结束语，直接输出翻译后的正文。",
     
@@ -163,18 +248,19 @@ const PROMPTS = {
     5.  时长控制在 5-8 分钟的阅读量。`
 };
 
+
 // --- API CLIENT ---
 
 export const ApiService = {
   // GET /api/repos (Get all repos)
   getRepos: async (): Promise<Repo[]> => {
-    await delay(300);
+    // No explicit re-hydration of files here to keep listing fast
+    // Files are re-hydrated in getRepo detail view
     return [...repos].sort((a, b) => new Date(b.importedAt).getTime() - new Date(a.importedAt).getTime());
   },
 
   // POST /api/import
   importRepo: async (file: File): Promise<Repo> => {
-    await delay(MOCK_DELAY);
     let pageCount = 0;
     try {
         const ab = await file.arrayBuffer();
@@ -182,8 +268,18 @@ export const ApiService = {
         pageCount = pdf.numPages;
     } catch (e) { console.warn(e); }
     
+    const fileId = `file-${Date.now()}`;
+    const repoId = `repo-${Date.now()}`;
+
+    // 1. Save File Blob to IndexedDB
+    try {
+        await idbHelper.saveFile(fileId, file);
+    } catch (e) {
+        console.error("Failed to save file to IndexedDB", e);
+    }
+
     const newRepo: Repo = {
-      id: `repo-${Date.now()}`,
+      id: repoId,
       name: file.name.replace('.pdf', ''),
       description: 'Imported document',
       authors: ['Unknown Author'], // Mock extraction
@@ -193,38 +289,69 @@ export const ApiService = {
       pageCount: pageCount || 1, 
       files: [
         {
-          id: `file-${Date.now()}`,
+          id: fileId,
           name: file.name,
           type: 'pdf',
           category: 'original',
-          file: file,
+          file: file, // Keep in memory for current session
           createdAt: new Date().toISOString()
         }
       ]
     };
     repos.push(newRepo); 
+    persistState(); // Save to LocalStorage
     return newRepo;
   },
 
   updateRepoMetadata: async (repoId: string, updates: Partial<Repo>): Promise<void> => {
-    await delay(200);
     const repo = repos.find(r => r.id === repoId);
     if (repo) {
         Object.assign(repo, updates);
+        persistState();
     }
   },
 
   renameRepo: async (repoId: string, newName: string): Promise<void> => {
     const repo = repos.find(r => r.id === repoId);
-    if (repo) repo.name = newName;
+    if (repo) {
+        repo.name = newName;
+        persistState();
+    }
   },
 
   deleteRepo: async (repoId: string): Promise<void> => {
+    // Cleanup IndexedDB files
+    const repo = repos.find(r => r.id === repoId);
+    if (repo) {
+        for (const file of repo.files) {
+            if (file.type === 'pdf') {
+                await idbHelper.deleteFile(file.id);
+            }
+        }
+    }
     repos = repos.filter(r => r.id !== repoId);
+    persistState();
   },
 
   getRepo: async (repoId: string): Promise<Repo | undefined> => {
-    return repos.find(r => r.id === repoId);
+    const repo = repos.find(r => r.id === repoId);
+    if (!repo) return undefined;
+
+    // Re-hydrate PDF Files from IndexedDB if the File object is missing (page refresh)
+    for (const file of repo.files) {
+        if (file.type === 'pdf' && !file.file) {
+            try {
+                const blob = await idbHelper.getFile(file.id);
+                if (blob) {
+                    file.file = new File([blob], file.name, { type: 'application/pdf' });
+                }
+            } catch (e) {
+                console.error("Failed to restore PDF from DB", e);
+            }
+        }
+    }
+
+    return repo;
   },
 
   getRepoRuns: async (repoId: string): Promise<Run[]> => {
@@ -336,6 +463,7 @@ export const ApiService = {
         createdAt: new Date().toISOString()
     };
     repo.files.push(newFile);
+    persistState();
     return newFile;
   },
 
@@ -352,6 +480,7 @@ export const ApiService = {
       createdAt: new Date().toISOString()
     };
     runs.unshift(newRun);
+    persistState();
     processRun(newRun.id);
     return newRun;
   },
@@ -363,6 +492,13 @@ async function processFileGeneration(repoId: string, category: 'translation' | '
     const repo = repos.find(r => r.id === repoId);
     if (!repo) throw new Error("Repo not found");
     const original = repo.files.find(f => f.category === 'original');
+    
+    // Attempt re-hydration if file is missing (e.g. freshly loaded from LS)
+    if (original && !original.file && original.type === 'pdf') {
+        const blob = await idbHelper.getFile(original.id);
+        if (blob) original.file = new File([blob], original.name, { type: 'application/pdf' });
+    }
+
     if (!original || !original.file) throw new Error("No PDF found");
 
     const text = await extractPdfText(original.file);
@@ -377,6 +513,7 @@ async function processFileGeneration(repoId: string, category: 'translation' | '
         createdAt: new Date().toISOString()
     };
     repo.files.push(newFile);
+    persistState();
     return newFile;
   }
 
@@ -384,6 +521,7 @@ const processRun = async (runId: string) => {
   const run = runs.find(r => r.id === runId);
   if (!run) return;
   run.status = RunStatus.PROCESSING;
+  persistState();
 
   try {
     let systemPrompt = "你是一个学术助手。请用中文回答。";
@@ -403,8 +541,10 @@ const processRun = async (runId: string) => {
 
     run.output = output;
     run.status = RunStatus.COMPLETED;
+    persistState();
   } catch (error) {
     run.status = RunStatus.FAILED;
     run.output = "AI Processing Failed";
+    persistState();
   }
 };

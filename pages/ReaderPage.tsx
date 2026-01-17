@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import Layout from '../components/ui/Layout';
 import DocumentViewer from '../components/Reader/DocumentViewer';
 import TextViewer from '../components/Reader/TextViewer';
@@ -14,6 +14,7 @@ type ViewableFile = RepoFile & { originRepoId: string; originRepoName: string };
 
 const ReaderPage: React.FC = () => {
   const { repoId } = useParams<{ repoId: string }>();
+  const [searchParams] = useSearchParams();
   const [repo, setRepo] = useState<Repo | null>(null);
   
   // State for files currently open in the viewer (can be from different repos)
@@ -40,9 +41,26 @@ const ReaderPage: React.FC = () => {
         ApiService.getRepo(repoId).then(r => {
             if (r) {
                 setRepo(r);
-                // Initialize viewing files with the first file of this repo if empty
-                if (viewingFiles.length === 0 && r.files.length > 0) {
-                    setViewingFiles([{ ...r.files[0], originRepoId: r.id, originRepoName: r.name }]);
+                
+                // Determine initial files to view based on URL param
+                const requestedFileId = searchParams.get('fileId');
+                let initialFiles: ViewableFile[] = [];
+
+                if (requestedFileId) {
+                    const found = r.files.find(f => f.id === requestedFileId);
+                    if (found) {
+                        initialFiles = [{ ...found, originRepoId: r.id, originRepoName: r.name }];
+                    }
+                }
+
+                // Default: if no specific file requested AND no files currently viewing, open the first one
+                if (initialFiles.length === 0 && viewingFiles.length === 0 && r.files.length > 0) {
+                    initialFiles = [{ ...r.files[0], originRepoId: r.id, originRepoName: r.name }];
+                }
+                
+                // Only update state if we have new initial files to show and nothing is currently shown
+                if (initialFiles.length > 0 && viewingFiles.length === 0) {
+                    setViewingFiles(initialFiles);
                 }
             }
         });
@@ -50,7 +68,7 @@ const ReaderPage: React.FC = () => {
         // Load all repos for the "Add File" feature
         ApiService.getRepos().then(setAllRepos);
     }
-  }, [repoId]);
+  }, [repoId, searchParams]); // Add searchParams to dependency
 
   // Synchronized Scrolling Logic
   const handleScroll = (sourceFileId: string, e: React.UIEvent<HTMLDivElement>) => {
