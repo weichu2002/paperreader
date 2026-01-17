@@ -1,127 +1,16 @@
 
 import { Repo, Run, RunStatus, Asset, RepoFile } from '../types';
 import { MOCK_DELAY } from '../constants';
-import * as pdfjsLib from 'pdfjs-dist';
-
-// Configure PDF.js worker
-const PDFJS: any = (pdfjsLib as any).default || pdfjsLib;
-PDFJS.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
 
 // --- CONFIGURATION ---
 const API_KEY = 'sk-26d09fa903034902928ae380a56ecfd3';
 const BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
 const MODEL_NAME = "deepseek-v3"; 
 
-// --- STORAGE KEYS ---
-const STORAGE_KEYS = {
-  REPOS: 'citerepo_repos_v1',
-  RUNS: 'citerepo_runs_v1'
-};
-
-// --- INDEXED DB HELPER (For PDF Blobs) ---
-const DB_NAME = 'CiteRepoDB';
-const DB_VERSION = 1;
-const STORE_NAME = 'files';
-
-const idbHelper = {
-  getDB: (): Promise<IDBDatabase> => {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
-      request.onupgradeneeded = (event: any) => {
-        const db = event.target.result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          db.createObjectStore(STORE_NAME);
-        }
-      };
-      request.onsuccess = (event: any) => resolve(event.target.result);
-      request.onerror = (event) => reject(event);
-    });
-  },
-  saveFile: async (id: string, file: Blob) => {
-    const db = await idbHelper.getDB();
-    return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.put(file, id);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  },
-  getFile: async (id: string): Promise<Blob | undefined> => {
-    const db = await idbHelper.getDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readonly');
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.get(id);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-  },
-  deleteFile: async (id: string) => {
-    const db = await idbHelper.getDB();
-    return new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, 'readwrite');
-        const store = tx.objectStore(STORE_NAME);
-        store.delete(id);
-        tx.oncomplete = () => resolve();
-    });
-  }
-};
-
-// --- MOCK DATABASE (In-Memory with Persistence) ---
-// Initialize from LocalStorage if available
-let repos: Repo[] = (() => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEYS.REPOS);
-    return stored ? JSON.parse(stored) : [];
-  } catch (e) { return []; }
-})();
-
-let runs: Run[] = (() => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEYS.RUNS);
-    return stored ? JSON.parse(stored) : [];
-  } catch (e) { return []; }
-})();
-
+// --- STATE MANAGEMENT (In-Memory Only) ---
+let repos: Repo[] = [];
+let runs: Run[] = [];
 let assets: Asset[] = [];
-
-// Fallback Mock Data if Storage is empty
-if (repos.length === 0) {
-    repos = [
-    {
-        id: 'repo-1',
-        name: 'Attention Is All You Need',
-        description: 'The seminal paper introducing the Transformer architecture.',
-        authors: ['Vaswani et al.'],
-        year: '2017',
-        tags: ['Transformer', 'NLP', 'Deep Learning'],
-        files: [
-        {
-            id: 'file-1-orig',
-            name: 'attention.pdf',
-            type: 'pdf',
-            category: 'original',
-            createdAt: new Date().toISOString()
-            // Note: File object is missing initially in mock, handling in getRepo
-        }
-        ],
-        importedAt: new Date().toISOString(),
-        pageCount: 15
-    }
-    ];
-}
-
-// Helper to persist state
-const persistState = () => {
-  try {
-    // JSON.stringify will strip 'file' (File/Blob) objects automatically, which is what we want for LS
-    localStorage.setItem(STORAGE_KEYS.REPOS, JSON.stringify(repos));
-    localStorage.setItem(STORAGE_KEYS.RUNS, JSON.stringify(runs));
-  } catch (e) {
-    console.error("Failed to save state to LocalStorage", e);
-  }
-};
 
 // Helper to simulate network delay
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -129,6 +18,10 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 // --- HELPER: Extract Text from PDF (FULL CONTENT) ---
 const extractPdfText = async (file: File): Promise<string> => {
   try {
+    // Access global PDF.js library injected via <script> in index.html
+    const PDFJS = window.pdfjsLib;
+    if (!PDFJS) throw new Error("PDF.js library not loaded");
+
     const arrayBuffer = await file.arrayBuffer();
     const loadingTask = PDFJS.getDocument({ data: arrayBuffer });
     const pdf = await loadingTask.promise;
@@ -180,66 +73,48 @@ const callAI = async (messages: any[]) => {
   }
 };
 
-// --- SPECIALIZED PROMPTS (UPDATED FOR CHINESE) ---
-// ... (Prompts kept exactly as is, omitted for brevity but implicitly included) ...
+// --- SPECIALIZED PROMPTS ---
 const PROMPTS = {
     TRANSLATE: "你是一位专业的学术论文翻译家。请将提供的英文论文片段翻译成中文。要求：\n1. 保持Markdown格式（标题、列表、代码块）。\n2. 保留数学公式的LaTeX格式。\n3. 术语翻译准确、学术化。\n4. 不要输出任何开场白或结束语，直接输出翻译后的正文。",
-    
     METHODOLOGY: `你是一位精通算法和实验设计的资深研究员。请用**中文**提取这篇论文的【研究方法论】并生成一份教学指南。
-    
     输出要求：
     1. **核心算法流程**：用清晰的步骤描述模型是如何工作的。
     2. **数学原理拆解**：解释关键公式的物理含义。
     3. **实施细节**：列出超参数、训练技巧或特殊的数据处理方法。
     4. **复现难点预警**：指出在复现这个方法时最容易踩的坑。
-    
     请用 Markdown 格式输出，确保全文为中文。`,
-
     CRITIQUE: `你现在是 "Reviewer #2"（以严苛著称的审稿人）。请用**中文**对这篇论文进行【批判性思维训练】分析。
-    
     输出要求：
     1. **逻辑漏洞**：指出论文论证链条中的薄弱环节。
     2. **证据强度评估**：实验结果是否真的足以支持其宣称的结论？有没有过度主张（Overclaiming）？
     3. **替代解释**：目前的实验现象是否可能由其他原因导致？
     4. **偏见识别**：作者在选择基线（Baselines）或数据集时是否存在选择偏差？
-    
     请用 Markdown 输出，保持客观、犀利、有理有据，必须是中文。`,
-
     GRAPH: `你是一位知识图谱专家。请分析这篇论文的核心概念，并生成一个 Mermaid.js 的流程图或思维导图代码来展示这些概念之间的关系（因果、包含、对比等）。
-    
     重要：
     1. **只输出 Mermaid 代码块**，不要任何解释文字。
     2. 使用 graph TD 或 mindmap 语法。
     3. **节点内容必须是中文翻译**。
     4. 确保代码语法正确，可以被 Mermaid 渲染。`,
-
     GAPS: `你是一位具有前瞻性眼光的战略科学家。请基于这篇论文的内容，通过【研究问题发现引擎】挖掘未来的机会。请用**中文**回答。
-    
     输出要求：
     1. **未解决的问题**：这篇论文留下了哪些“坑”没填？
     2. **潜在矛盾点**：这篇论文的结论是否与主流观点或其他经典论文有冲突？
     3. **跨学科灵感**：这个方法还能应用到哪些其他领域（如生物、金融、艺术）？
     4. **下一步研究建议**：如果我是博士生，沿着这个方向做研究，下一个题目应该是什么？
-    
     请用 Markdown 输出。`,
-
     COMPARE: `你是一位学术综述作者。请对提供的这几篇（或两部分）内容进行【对比矩阵分析】。请用**中文**回答。
-    
     请生成一个 Markdown 表格，横向是不同的文档/部分，纵向是以下维度：
     1. 核心问题 (Core Problem)
     2. 方法论 (Methodology)
     3. 数据集 (Dataset)
     4. 关键结果 (Key Results)
     5. 局限性 (Limitations)
-    
     并在表格下方总结它们之间的主要矛盾或互补关系。`,
-
     PODCAST: `你是一档热门科技播客的制作人。请阅读这篇论文，并生成一段**两位主持人（A 和 B）之间的对话脚本**。
-    
     角色设定：
     *   **主持人A**：好奇心强，负责提问和引导话题，代表普通听众的视角。
     *   **主持人B**：领域专家，风趣幽默，善于用通俗的比喻解释复杂概念。
-    
     要求：
     1.  **全中文对话**，口语化，生动自然，不要像念稿子。
     2.  以“欢迎收听今天的 Deep Dive”开场。
@@ -254,8 +129,6 @@ const PROMPTS = {
 export const ApiService = {
   // GET /api/repos (Get all repos)
   getRepos: async (): Promise<Repo[]> => {
-    // No explicit re-hydration of files here to keep listing fast
-    // Files are re-hydrated in getRepo detail view
     return [...repos].sort((a, b) => new Date(b.importedAt).getTime() - new Date(a.importedAt).getTime());
   },
 
@@ -263,20 +136,16 @@ export const ApiService = {
   importRepo: async (file: File): Promise<Repo> => {
     let pageCount = 0;
     try {
-        const ab = await file.arrayBuffer();
-        const pdf = await PDFJS.getDocument({ data: ab }).promise;
-        pageCount = pdf.numPages;
+        const PDFJS = window.pdfjsLib;
+        if (PDFJS) {
+            const ab = await file.arrayBuffer();
+            const pdf = await PDFJS.getDocument({ data: ab }).promise;
+            pageCount = pdf.numPages;
+        }
     } catch (e) { console.warn(e); }
     
     const fileId = `file-${Date.now()}`;
     const repoId = `repo-${Date.now()}`;
-
-    // 1. Save File Blob to IndexedDB
-    try {
-        await idbHelper.saveFile(fileId, file);
-    } catch (e) {
-        console.error("Failed to save file to IndexedDB", e);
-    }
 
     const newRepo: Repo = {
       id: repoId,
@@ -298,8 +167,8 @@ export const ApiService = {
         }
       ]
     };
-    repos.push(newRepo); 
-    persistState(); // Save to LocalStorage
+
+    repos.push(newRepo);
     return newRepo;
   },
 
@@ -307,7 +176,6 @@ export const ApiService = {
     const repo = repos.find(r => r.id === repoId);
     if (repo) {
         Object.assign(repo, updates);
-        persistState();
     }
   },
 
@@ -315,43 +183,15 @@ export const ApiService = {
     const repo = repos.find(r => r.id === repoId);
     if (repo) {
         repo.name = newName;
-        persistState();
     }
   },
 
   deleteRepo: async (repoId: string): Promise<void> => {
-    // Cleanup IndexedDB files
-    const repo = repos.find(r => r.id === repoId);
-    if (repo) {
-        for (const file of repo.files) {
-            if (file.type === 'pdf') {
-                await idbHelper.deleteFile(file.id);
-            }
-        }
-    }
     repos = repos.filter(r => r.id !== repoId);
-    persistState();
   },
 
   getRepo: async (repoId: string): Promise<Repo | undefined> => {
-    const repo = repos.find(r => r.id === repoId);
-    if (!repo) return undefined;
-
-    // Re-hydrate PDF Files from IndexedDB if the File object is missing (page refresh)
-    for (const file of repo.files) {
-        if (file.type === 'pdf' && !file.file) {
-            try {
-                const blob = await idbHelper.getFile(file.id);
-                if (blob) {
-                    file.file = new File([blob], file.name, { type: 'application/pdf' });
-                }
-            } catch (e) {
-                console.error("Failed to restore PDF from DB", e);
-            }
-        }
-    }
-
-    return repo;
+    return repos.find(r => r.id === repoId);
   },
 
   getRepoRuns: async (repoId: string): Promise<Run[]> => {
@@ -434,7 +274,6 @@ export const ApiService = {
     });
   },
 
-  // UPDATED: Now accepts full RepoFile objects to allow cross-repo comparison
   generateComparisonMatrix: async (repoId: string, filesToCompare: RepoFile[]): Promise<RepoFile> => {
     const repo = repos.find(r => r.id === repoId);
     if (!repo) throw new Error("Repo not found");
@@ -463,7 +302,6 @@ export const ApiService = {
         createdAt: new Date().toISOString()
     };
     repo.files.push(newFile);
-    persistState();
     return newFile;
   },
 
@@ -480,7 +318,6 @@ export const ApiService = {
       createdAt: new Date().toISOString()
     };
     runs.unshift(newRun);
-    persistState();
     processRun(newRun.id);
     return newRun;
   },
@@ -493,12 +330,6 @@ async function processFileGeneration(repoId: string, category: 'translation' | '
     if (!repo) throw new Error("Repo not found");
     const original = repo.files.find(f => f.category === 'original');
     
-    // Attempt re-hydration if file is missing (e.g. freshly loaded from LS)
-    if (original && !original.file && original.type === 'pdf') {
-        const blob = await idbHelper.getFile(original.id);
-        if (blob) original.file = new File([blob], original.name, { type: 'application/pdf' });
-    }
-
     if (!original || !original.file) throw new Error("No PDF found");
 
     const text = await extractPdfText(original.file);
@@ -513,7 +344,6 @@ async function processFileGeneration(repoId: string, category: 'translation' | '
         createdAt: new Date().toISOString()
     };
     repo.files.push(newFile);
-    persistState();
     return newFile;
   }
 
@@ -521,7 +351,6 @@ const processRun = async (runId: string) => {
   const run = runs.find(r => r.id === runId);
   if (!run) return;
   run.status = RunStatus.PROCESSING;
-  persistState();
 
   try {
     let systemPrompt = "你是一个学术助手。请用中文回答。";
@@ -541,10 +370,8 @@ const processRun = async (runId: string) => {
 
     run.output = output;
     run.status = RunStatus.COMPLETED;
-    persistState();
   } catch (error) {
     run.status = RunStatus.FAILED;
     run.output = "AI Processing Failed";
-    persistState();
   }
 };

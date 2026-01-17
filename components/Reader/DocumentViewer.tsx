@@ -3,11 +3,6 @@ import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { SAMPLE_PDF_TEXT } from '../../constants';
 import { SelectionData, RegionData } from '../../types';
 import { MousePointer2, Crop, Loader2, AlertCircle } from 'lucide-react';
-import * as pdfjsLib from 'pdfjs-dist';
-
-// Fix for ESM import via CDN
-const PDFJS: any = (pdfjsLib as any).default || pdfjsLib;
-PDFJS.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
 
 const TEXT_LAYER_CSS = `
   .textLayer {
@@ -71,6 +66,9 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ file, onTextSelect, onR
       setIsLoading(true);
       setError(null);
       try {
+        const PDFJS = window.pdfjsLib;
+        if (!PDFJS) throw new Error("PDF.js library failed to load.");
+
         const arrayBuffer = await file.arrayBuffer();
         const loadingTask = PDFJS.getDocument({ data: arrayBuffer });
         const pdf = await loadingTask.promise;
@@ -248,7 +246,9 @@ const PDFPage: React.FC<{ pdf: any; pageNumber: number; scale: number }> = ({ pd
         textLayerDiv.style.setProperty('--scale-factor', `${scale}`);
 
         const textContent = await page.getTextContent();
-        PDFJS.renderTextLayer({
+        
+        // Use Global PDFJS
+        window.pdfjsLib.renderTextLayer({
           textContentSource: textContent,
           container: textLayerDiv,
           viewport: viewport,

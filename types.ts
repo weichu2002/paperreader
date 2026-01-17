@@ -66,3 +66,11 @@ export interface RegionData {
   height: number;
   page: number;
 }
+
+// Global Window Extensions
+declare global {
+  interface Window {
+    mermaid: any;
+    pdfjsLib: any; // Direct access to the global PDF.js library
+  }
+}
